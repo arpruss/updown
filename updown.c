@@ -11,44 +11,39 @@
 #include <poll.h>
 #include <linux/uinput.h>
 
-char *deviceNames[] = { "N: Name=\"qpnp_pon\"", "N: Name=\"gpio-keys\"" };
-
-#define NUM_DEVICES (sizeof(deviceNames)/sizeof(*deviceNames))
+#define MAX_DEVICES 128
 
 #define BUFSIZE 1024
 #define NUM_KEY_BITS 
 
 #define GET_BIT(data,bit) ((data[(bit)/8] >> ((bit)%8))&1)
 #define SET_BIT(data,bit) data[(bit)/8] |= 1 << ((bit)%8)
+#define CLR_BIT(data,bit) data[(bit)/8] &= ~(1 << ((bit)%8))
 
-char deviceFilenames[NUM_DEVICES][BUFSIZE] = { "", "" };
-struct pollfd devices[NUM_DEVICES];
-unsigned long eventsToSupport;
-unsigned char keysToSupport[(KEY_CNT+7)/8] = { 0 };
-
+char* skip[] = {"P: Phys=ALSA"};
 int remap[][2] = {
     { 0x72, KEY_PAGEDOWN },
     { 0x73, KEY_PAGEUP },
 };
 
-void emit(int fd, int type, int code, int val)
-   {
-      struct input_event ie;
-
-      ie.type = type;
-      ie.code = code;
-      ie.value = val;
-      /* timestamp values below are ignored */
-      ie.time.tv_sec = 0;
-      ie.time.tv_usec = 0;
-
-      write(fd, &ie, sizeof(ie));
-   }
-
+struct pollfd devices[MAX_DEVICES];
+unsigned long eventsToSupport = 1UL<<EV_KEY;
+unsigned char keysToSupport[(KEY_CNT+7)/8] = { 0 };
+int numDevices;
 
 #define NUM_REMAP (sizeof(remap)/sizeof(*remap))
 
-int main() {
+int getRemap(int in) {
+    for (int i=0; i<NUM_REMAP; i++)
+        if (remap[i][0] == in)
+            return remap[i][1];
+    return -1;
+}
+
+int main(int argc, char** argv) {
+    
+    int verbose = argc > 1 && !strcmp(argv[1], "-v");
+    
     FILE* f = fopen("/proc/bus/input/devices", "r");
     if (f == NULL) {
         fprintf(stderr, "Cannot scan devices\n");
@@ -56,46 +51,94 @@ int main() {
     }
         
     char line[BUFSIZE+1];
-    int current = -1;
-    int number = -1;
+    int skipCurrent = 0;
+    numDevices = 0;
+    
     while (NULL != fgets(line,BUFSIZE,f)) {
+        if (numDevices >= MAX_DEVICES)
+            break;
+        
         int i;
         
         line[BUFSIZE] = 0;
+        int l = strlen(line);
+        if (l == 0)
+            continue;
+        if (line[l-1] == '\n')
+            line[l-1] = 0;
+        
         if (!strncmp(line, "I: ", 3)) {
-            number++;
+            skipCurrent = 0;
             continue;
         }
-        for (i = 0 ; i < NUM_DEVICES ; i++) 
-            if (!strncmp(line, deviceNames[i], strlen(deviceNames[i]))) {
-                sprintf(deviceFilenames[i], "/dev/input/event%d", number);
+        
+        if (skipCurrent)
+            continue;
+        
+        for (i = 0 ; i < sizeof(skip)/sizeof(*skip); i++)
+            if (!strcmp(line, skip[i])) {
+                skipCurrent = 1;
                 break;
             }
+
+        if (skipCurrent)
+            continue;
+
+        if (!strncmp(line, "H: Handlers=", 57-45)) {
+            skipCurrent = 1;
+
+            char filename[BUFSIZE];
+            char* s = strstr(line, "event");
+            if (s != NULL) {
+                sprintf(filename, "/dev/input/event%d", atoi(s+5));
+            }
+            int fd = open(filename, O_RDONLY|O_NONBLOCK);
+            if (0 <= fd) {
+                unsigned long e = 0;
+                ioctl(fd, EVIOCGBIT(0, sizeof(e)), &e);
+                if (0 == (e & (1UL << EV_KEY))) {
+                    close(fd);
+                    continue;
+                }
+                unsigned char k[(KEY_CNT+7)/8] = { 0 };
+                ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(k)), &k);
+                int need = 0;
+                for (int i=0; i<NUM_REMAP; i++)
+                    if (GET_BIT(k, remap[i][0])) {
+                        need = 1;
+                        break;
+                    }
+                    
+                if (!need) {
+                    close(fd);
+                    continue;
+                }
+
+                eventsToSupport |= e;
+                for (int i=0; i<=KEY_CNT; i++) {
+                    if (GET_BIT(k, i))
+                        SET_BIT(keysToSupport, i);
+                }
+                
+                ioctl(fd, EVIOCGRAB, (void*)1);
+                devices[numDevices].fd = fd;
+                devices[numDevices].events = POLLIN;
+                if (verbose) {
+                    printf("Including %s\n", filename);
+                }
+                numDevices++;
+            }
+        }
     }
     fclose(f);
-    for (int i=0; i<NUM_DEVICES ; i++) {
-        if (deviceFilenames[i][0] == 0) {
-            fprintf(stderr, "Cannot find device %s\n", deviceNames[i]);
-            exit(2);
-        }
-    }
     
-    for (int i=0; i<NUM_DEVICES ; i++) {
-        devices[i].fd = open(deviceFilenames[i], O_RDONLY|O_NONBLOCK);
-        if (devices[i].fd < 0) {
-            fprintf(stderr, "Error opening %s\n", deviceFilenames[i]);
-            exit(3);
-        }
-        unsigned long e = 0;
-        ioctl(devices[i].fd, EVIOCGBIT(0, sizeof(e)), &e);
-        eventsToSupport |= e;
-        unsigned char k[(KEY_CNT+7)/8] = { 0 };
-        ioctl(devices[i].fd, EVIOCGBIT(EV_KEY, sizeof(k)), &k);
-        for (int i=0; i<sizeof(k); i++)
-            keysToSupport[i] |= k[i];
-        devices[i].events = POLLIN;
-        ioctl(devices[i].fd, EVIOCGRAB, (void*)1);
+    if (numDevices==0) {
+        fprintf(stderr, "No good input devices found\n");
+        exit(7);
     }
+
+    for (int i=0; i<NUM_REMAP; i++)
+        SET_BIT(keysToSupport, remap[i][1]);
     
     static int fakeKeyboardHandle;
     struct uinput_setup fakeKeyboard;
@@ -111,14 +154,18 @@ int main() {
     for (int i=0;i<=EV_MAX;i++)
         if (i == EV_KEY || eventsToSupport & (1UL<<i)) 
             ioctl(fakeKeyboardHandle, UI_SET_EVBIT, i);
-    eventsToSupport |= 1UL<<EV_KEY;
+        
     unsigned bit = 0;
     unsigned long e = eventsToSupport;
+
     while (e & 1) {
         ioctl(fakeKeyboardHandle, UI_SET_EVBIT, bit);
         bit++;
         e >>= 1;
     }
+
+    for (int i=0;i<NUM_REMAP && i<=KEY_MAX; i++)
+        CLR_BIT(keysToSupport, remap[i][0]);
 
     for (int i=0;i<NUM_REMAP && i<=KEY_MAX; i++)
         SET_BIT(keysToSupport, remap[i][1]);
@@ -129,20 +176,25 @@ int main() {
     
     ioctl(fakeKeyboardHandle, UI_DEV_SETUP, &fakeKeyboard);
     ioctl(fakeKeyboardHandle, UI_DEV_CREATE);
-      
+    
     
     while(1) {
-        if(0 < poll(devices, NUM_DEVICES, 2000)) {
-            for (int i=0; i<NUM_DEVICES; i++) {
+        if (verbose)
+            printf("polling\n");
+        
+        if(0 < poll(devices, numDevices, 2000)) {
+            for (int i=0; i<numDevices; i++) {
                 if (devices[i].revents) {
                     struct input_event event;
                     
                     if (sizeof(event) == read(devices[i].fd, &event, sizeof(event))) {
-                        for (int j=0; j<NUM_REMAP; j++) 
-                            if (event.code == remap[j][0]) {
-                                event.code = remap[j][1];
-                                break;
+                        int outCode = getRemap(event.code);
+                        if (outCode >= 0) {
+                            if (verbose) {
+                                printf("%d -> %d\n", event.code, outCode);
                             }
+                            event.code = outCode;
+                        }
                         write(fakeKeyboardHandle, &event, sizeof(event));
                     }
                 }
