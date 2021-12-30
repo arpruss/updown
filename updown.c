@@ -12,6 +12,7 @@
 #include <linux/uinput.h>
 
 #define MAX_DEVICES 128
+#define MAX_REMAP 256
 
 #define BUFSIZE 1024
 #define NUM_KEY_BITS 
@@ -21,20 +22,16 @@
 #define CLR_BIT(data,bit) data[(bit)/8] &= ~(1 << ((bit)%8))
 
 char* skip[] = {"P: Phys=ALSA"};
-int remap[][2] = {
-    { 0x72, KEY_PAGEDOWN },
-    { 0x73, KEY_PAGEUP },
-};
+int remap[MAX_REMAP][2];
+int numRemap;
 
 struct pollfd devices[MAX_DEVICES];
 unsigned long eventsToSupport = 1UL<<EV_KEY;
 unsigned char keysToSupport[(KEY_CNT+7)/8] = { 0 };
 int numDevices;
 
-#define NUM_REMAP (sizeof(remap)/sizeof(*remap))
-
 int getRemap(int in) {
-    for (int i=0; i<NUM_REMAP; i++)
+    for (int i=0; i<numRemap; i++)
         if (remap[i][0] == in)
             return remap[i][1];
     return -1;
@@ -42,7 +39,31 @@ int getRemap(int in) {
 
 int main(int argc, char** argv) {
     
-    int verbose = argc > 1 && !strcmp(argv[1], "-v");
+    int arg = 1;
+    int verbose = 0;
+    
+    while (arg < argc && argv[arg][0] == '-') {
+        if (argv[arg][1] == 'v')
+            verbose = 1;
+        arg++;
+    }
+    
+    numRemap = 0;
+    
+    while (arg + 1 < argc) {
+        remap[numRemap][0] = atoi(argv[arg]);
+        remap[numRemap][1] = atoi(argv[arg+1]);
+        arg += 2;
+        numRemap++;
+    }
+    
+    if (numRemap == 0) {
+        remap[0][0] = KEY_VOLUMEDOWN;
+        remap[0][1] = KEY_PAGEDOWN;
+        remap[1][0] = KEY_VOLUMEUP;
+        remap[1][1] = KEY_PAGEUP;
+        numRemap = 2;
+    }
     
     FILE* f = fopen("/proc/bus/input/devices", "r");
     if (f == NULL) {
@@ -103,7 +124,7 @@ int main(int argc, char** argv) {
                 unsigned char k[(KEY_CNT+7)/8] = { 0 };
                 ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(k)), &k);
                 int need = 0;
-                for (int i=0; i<NUM_REMAP; i++)
+                for (int i=0; i<numRemap; i++)
                     if (GET_BIT(k, remap[i][0])) {
                         need = 1;
                         break;
@@ -137,16 +158,14 @@ int main(int argc, char** argv) {
         exit(7);
     }
 
-    for (int i=0; i<NUM_REMAP; i++)
-        SET_BIT(keysToSupport, remap[i][1]);
-    
     static int fakeKeyboardHandle;
     struct uinput_setup fakeKeyboard;
     fakeKeyboardHandle = open("/dev/uinput", O_WRONLY);
     if(fakeKeyboardHandle < 0) {
          fprintf(stderr, "Unable to open /dev/uinput\n");
          exit(4);
-    }    
+    }   
+    
     memset(&fakeKeyboard, 0, sizeof(fakeKeyboard));
     strcpy(fakeKeyboard.name, "MyFakeKeyboard");
     fakeKeyboard.id.bustype = BUS_VIRTUAL;
@@ -164,11 +183,12 @@ int main(int argc, char** argv) {
         e >>= 1;
     }
 
-    for (int i=0;i<NUM_REMAP && i<=KEY_MAX; i++)
+    for (int i=0;i<numRemap && i<=KEY_MAX; i++)
         CLR_BIT(keysToSupport, remap[i][0]);
 
-    for (int i=0;i<NUM_REMAP && i<=KEY_MAX; i++)
-        SET_BIT(keysToSupport, remap[i][1]);
+    for (int i=0;i<numRemap && i<=KEY_MAX; i++)
+        if (0 <= remap[i][1])
+            SET_BIT(keysToSupport, remap[i][1]);
     
     for (int i=0; i<=KEY_MAX; i++)
         if (GET_BIT(keysToSupport, i))
@@ -176,7 +196,6 @@ int main(int argc, char** argv) {
     
     ioctl(fakeKeyboardHandle, UI_DEV_SETUP, &fakeKeyboard);
     ioctl(fakeKeyboardHandle, UI_DEV_CREATE);
-    
     
     while(1) {
         if (verbose)
