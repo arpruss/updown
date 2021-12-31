@@ -1,6 +1,7 @@
 // PUBLIC DOMAIN CODE
 // Remap volume up/down keys on OnePlus 9 as page-up/down
 
+#include <sys/stat.h>
 #include <signal.h>
 #include <dirent.h> 
 #include <stdio.h>
@@ -89,6 +90,14 @@ void sigint_handler(int sig) {
     if (verbose) 
         printf("Interrupted\n");
     running = 0;    
+}
+
+int isDir(const char *path) {
+   struct stat statbuf;
+   
+   if (stat(path, &statbuf) < 0)
+       return 0;
+   return S_ISDIR(statbuf.st_mode);
 }
 
 int main(int argc, char** argv) {
@@ -200,6 +209,9 @@ int main(int argc, char** argv) {
             continue;
         
         sprintf(filename, "/dev/input/%s", dir->d_name);
+        
+        if (isDir(filename))
+            continue;
         
         if (verbose)
             printf("Trying %s\n", filename);
