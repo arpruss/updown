@@ -1,6 +1,7 @@
 // PUBLIC DOMAIN CODE
 // Remap volume up/down keys on OnePlus 9 as page-up/down
 
+#include <signal.h>
 #include <dirent.h> 
 #include <stdio.h>
 #include <malloc.h>
@@ -15,7 +16,7 @@
 
 #define MAX_DEVICES 128
 #define MAX_REMAP 256
-#define MAX_SKIPS 256
+#define MAX_FILTERS 256
 
 #define BUFSIZE 1024
 #define NUM_KEY_BITS
@@ -24,17 +25,34 @@
 #define SET_BIT(data,bit) data[(bit)/8] |= 1 << ((bit)%8)
 #define CLR_BIT(data,bit) data[(bit)/8] &= ~(1 << ((bit)%8))
 
+char* DEFAULT_OPTIONS[] = { "--reject-location", "ALSA", "114", "109", "115", "104" };
+
 const char CMD_PREFIX[] = ">/dev/null 2>/dev/null ";
 
-enum skipTypes {
-    LOCATION = 0
-};
-int numSkip = 0;
+int verbose = 0;
+int fakeKeyboardHandle = -1;
+int running;
 
-struct skip {
-    enum skipTypes type;
+enum filterBy {
+    LOCATION=0,
+    BUS,
+    NAME
+};
+#define MAX_FILTERBY NAME
+
+enum filterType {
+    ONLY=0,
+    REJECT,
+    ADD
+};
+
+int numFilters = 0;
+
+struct filter {
+    enum filterBy by;
+    enum filterType type;
     char* data;
-} skip[MAX_SKIPS];
+} filters[MAX_FILTERS];
 
 struct remap {
     int in;
@@ -46,7 +64,7 @@ int numRemap;
 struct pollfd devices[MAX_DEVICES];
 unsigned long eventsToSupport = 1UL<<EV_KEY;
 unsigned char keysToSupport[(KEY_CNT+7)/8] = { 0 };
-int numDevices;
+int numDevices = 0;
 
 struct remap* getRemap(int in) {
     for (int i=0; i<numRemap; i++)
@@ -54,51 +72,83 @@ struct remap* getRemap(int in) {
             return &remap[i];
     return NULL;
 }
+ 
+void closeAll(void) {
+    for (int i=0; i<numDevices; i++) {
+        close(devices[i].fd);
+    }
+    numDevices = 0;
+    
+    if (0 <= fakeKeyboardHandle)
+        close(fakeKeyboardHandle);
+    
+    fakeKeyboardHandle = -1;
+}
+
+void sigint_handler(int sig) {
+    if (verbose) 
+        printf("Interrupted\n");
+    running = 0;    
+}
 
 int main(int argc, char** argv) {
-    
     int arg = 1;
-    int verbose = 0;
-    int skipOptions = 0;
+    
+    if (arg == argc) {
+        arg = 0;
+        argv = DEFAULT_OPTIONS;
+        argc = sizeof(DEFAULT_OPTIONS)/sizeof(*DEFAULT_OPTIONS);
+    }
     
     while (arg < argc && argv[arg][0] == '-') {
         if (argv[arg][1] == 'h') {
-            printf("updown [--skip-location location] [--no-skip] [-v] REMAP LIST...\n"
+            printf("updown [-h] [--(only|reject|add)-(location|bus|name) xxx ...] [-v] REMAP LIST...\n"
                    " where REMAP LIST... is a list of entries of the form:\n"
                    "  x y                : remap key code x (decimal) to y; if y is -1, disable x\n"
-                   "  x cmd SHELLCOMMAND : run SHELLCOMMAND when key code x is pressed\n");
+                   "  x cmd SHELLCOMMAND : run SHELLCOMMAND when key code x is pressed\n"
+                   "If no arguments given, rejects location ALSA and remaps VOLUME UP/DOWN to PAGE UP/DOWN.\n");
             exit(0);
         }
         if (argv[arg][1] == 'v')
             verbose = 1;
-        if (!strcmp(argv[arg]+1,"-skip-location")) {
+        if (!strncmp(argv[arg]+1,"-reject-", 8) || !strncmp(argv[arg]+1,"-only-",6) ||
+            !strncmp(argv[arg]+1,"-add-", 4)) {
+                
             if (arg+1 >= argc) {
-                fprintf(stderr, "--skip-location needs an argument\n");
-                exit(8);
+                fprintf(stderr, "Missing argument for %s.\n", argv[arg]);
+                exit(1);
             }
-            skipOptions = 1;
+        
+            if (numFilters < MAX_FILTERS) {
+                char* type = strchr(argv[arg]+2,'-');
+                
+                if (type[0] == 'l')
+                    filters[numFilters].by = LOCATION;
+                else if (type[0] == 'n')
+                    filters[numFilters].by = NAME;
+                else if (type[0] == 'b')
+                    filters[numFilters].by = BUS;
 
-            if (numSkip < MAX_SKIPS) {
-                skip[numSkip].data = argv[arg+1];
-                skip[numSkip].type = LOCATION;
-                numSkip++;
+                filters[numFilters].data = argv[arg+1];
+
+                if (argv[arg][2] == 'o') 
+                    filters[numFilters].type = ONLY;
+                else if (argv[arg][2] == 'r')
+                    filters[numFilters].type = REJECT;
+                else if (argv[arg][2] == 'a') {
+                    filters[numFilters].type = ADD;
+                }
+                
+                numFilters++;
             }
             else {
-                fprintf(stderr, "Too many skips\n");
+                fprintf(stderr, "Too many filters\n");
             }
+            
             arg++;
         }
-        else if (!strcmp(argv[arg]+1,"-no-skip")) {
-            skipOptions = 1;
-            numSkip=0;
-        }
+        
         arg++;
-    }
-    
-    if (! skipOptions) {
-        skip[0].data = "ALSA";
-        skip[0].type = LOCATION;
-        numSkip = 1;
     }
     
     numRemap = 0;
@@ -120,16 +170,6 @@ int main(int argc, char** argv) {
             arg += 2;
         }
         numRemap++;
-    }
-    
-    if (numRemap == 0) {
-        remap[0].in = KEY_VOLUMEDOWN;
-        remap[0].out = KEY_PAGEDOWN;
-        remap[0].cmd = NULL;
-        remap[1].in = KEY_VOLUMEUP;
-        remap[1].out = KEY_PAGEUP;
-        remap[1].cmd = NULL;
-        numRemap = 2;
     }
     
     if (verbose) {
@@ -165,22 +205,83 @@ int main(int argc, char** argv) {
             printf("Trying %s\n", filename);
         
         int fd = open(filename, O_RDONLY|O_NONBLOCK);
-        if (fd < 0) 
+        if (fd < 0) {
+            if (verbose)
+                printf("  Couldn't open\n");
             continue;
+        }
 
-        int i;
-        for (i=0; i<numSkip; i++) {
-            if (skip[i].type == LOCATION) {
-                char location[BUFSIZE];
-                if (ioctl(fd, EVIOCGPHYS(sizeof(location) - 1), &location) < 1) {
-                    location[0] = 0;
-                }
-                if (!strcmp(skip[i].data, location))
-                    break;
-            }
+        char location[BUFSIZE];
+        if (ioctl(fd, EVIOCGPHYS(sizeof(location) - 1), &location) < 1) {
+            location[0] = 0;
         }
         
-        if (i<numSkip) {
+        if (verbose)
+            printf("  Location: %s\n", location);
+        
+        char name[BUFSIZE];
+        if (ioctl(fd, EVIOCGNAME(sizeof(location) - 1), &name) < 1) {
+            name[0] = 0;
+        }
+        
+        if (verbose)
+            printf("  Name: %s\n", name);
+        
+        struct input_id id;
+        if(ioctl(fd, EVIOCGID, &id)) {
+            memset(&id, 0, sizeof(id));
+        }
+
+        if (verbose)
+            printf("  Bus: %d\n", id.bustype);
+        
+        int reject = 0;
+        int accept = 0;
+
+        for (int t=0; t<=MAX_FILTERBY && !accept ; t++) {
+            int foundAddFilter = 0;
+            
+            for (int i=0; i<numFilters && !accept ; i++) {
+                if (filters[i].by != t)
+                    continue;
+                
+                int matches = 0;
+                
+                switch(t) {
+                    case BUS:
+                        matches = atoi(filters[i].data) == id.bustype;
+                        break;
+                    case LOCATION:
+                        matches = !strcmp(filters[i].data, location);
+                        break;
+                    case NAME:
+                        matches = !strcmp(filters[i].data, name);
+                        break;
+                }
+                
+                switch(filters[i].type) {
+                    case ADD:
+                        foundAddFilter = 1;
+                        if (matches) {
+                            accept = 1;
+                        }
+                        break;
+                    case REJECT:
+                        if (matches)
+                            reject = 1;
+                        break;
+                    case ONLY:
+                        if (!matches)
+                            reject = 1;
+                        break;
+                }
+            }
+            if (foundAddFilter && !accept) 
+                reject = 1;
+        }
+        
+        if (!accept && reject) {
+            if (verbose) fprintf(stderr, " Rejected\n");
             close(fd);
             continue;
         }
@@ -196,7 +297,7 @@ int main(int argc, char** argv) {
         unsigned char k[(KEY_CNT+7)/8] = { 0 };
         ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(k)), &k);
         int need = 0;
-        for (i=0; i<numRemap; i++)
+        for (int i=0; i<numRemap; i++)
             if (GET_BIT(k, remap[i].in)) {
                 need = 1;
                 break;
@@ -209,7 +310,7 @@ int main(int argc, char** argv) {
         }
 
         eventsToSupport |= e;
-        for (i=0; i<=KEY_CNT; i++) {
+        for (int i=0; i<=KEY_CNT; i++) {
             if (GET_BIT(k, i))
                 SET_BIT(keysToSupport, i);
         }
@@ -224,11 +325,10 @@ int main(int argc, char** argv) {
     }
     
     if (numDevices==0) {
-        fprintf(stderr, "No good input devices found\n");
+        fprintf(stderr, "No input devices that generate the specified keys found\n");
         exit(7);
     }
 
-    static int fakeKeyboardHandle;
     struct uinput_setup fakeKeyboard;
     fakeKeyboardHandle = open("/dev/uinput", O_WRONLY);
     if(fakeKeyboardHandle < 0) {
@@ -236,6 +336,9 @@ int main(int argc, char** argv) {
          exit(4);
     }   
     
+    signal(SIGINT, sigint_handler);
+    signal(SIGTERM, sigint_handler);
+
     memset(&fakeKeyboard, 0, sizeof(fakeKeyboard));
     strcpy(fakeKeyboard.name, "MyFakeKeyboard");
     fakeKeyboard.id.bustype = BUS_VIRTUAL;
@@ -267,7 +370,9 @@ int main(int argc, char** argv) {
     ioctl(fakeKeyboardHandle, UI_DEV_SETUP, &fakeKeyboard);
     ioctl(fakeKeyboardHandle, UI_DEV_CREATE);
     
-    while(1) {
+    running = 1;
+    
+    while(running) {
         if (verbose)
             printf("polling\n");
         
@@ -304,5 +409,11 @@ int main(int argc, char** argv) {
                 }
             }
         }
+    }
+    
+    closeAll();
+
+    if (verbose) {
+        printf("Exiting\n");
     }
 }
