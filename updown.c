@@ -15,7 +15,9 @@
 #define MAX_REMAP 256
 
 #define BUFSIZE 1024
-#define NUM_KEY_BITS 
+#define NUM_KEY_BITS
+
+#define NOT_FOUND (-32768)
 
 #define GET_BIT(data,bit) ((data[(bit)/8] >> ((bit)%8))&1)
 #define SET_BIT(data,bit) data[(bit)/8] |= 1 << ((bit)%8)
@@ -34,7 +36,7 @@ int getRemap(int in) {
     for (int i=0; i<numRemap; i++)
         if (remap[i][0] == in)
             return remap[i][1];
-    return -1;
+    return NOT_FOUND;
 }
 
 int main(int argc, char** argv) {
@@ -65,6 +67,11 @@ int main(int argc, char** argv) {
         numRemap = 2;
     }
     
+    if (verbose) {
+        for (int i=0; i<numRemap; i++) 
+            printf("Configured remap: %d -> %d\n", remap[i][0], remap[i][1]);
+    }
+
     FILE* f = fopen("/proc/bus/input/devices", "r");
     if (f == NULL) {
         fprintf(stderr, "Cannot scan devices\n");
@@ -214,7 +221,10 @@ int main(int argc, char** argv) {
                             }
                             event.code = outCode;
                         }
-                        write(fakeKeyboardHandle, &event, sizeof(event));
+                        if (outCode >= 0 || outCode == NOT_FOUND) {
+                            printf("write\n");
+                            write(fakeKeyboardHandle, &event, sizeof(event));
+                        }
                     }
                 }
             }
