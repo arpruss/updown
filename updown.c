@@ -2,6 +2,7 @@
 // Remap volume up/down keys on OnePlus 9 as page-up/down
 
 #include <stdio.h>
+#include <malloc.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <fcntl.h>
@@ -18,15 +19,19 @@
 #define BUFSIZE 1024
 #define NUM_KEY_BITS
 
-#define NOT_FOUND (-32768)
-
 #define GET_BIT(data,bit) ((data[(bit)/8] >> ((bit)%8))&1)
 #define SET_BIT(data,bit) data[(bit)/8] |= 1 << ((bit)%8)
 #define CLR_BIT(data,bit) data[(bit)/8] &= ~(1 << ((bit)%8))
 
+const char CMD_PREFIX[] = ">/dev/null 2>/dev/null ";
+
 char* skip[MAX_SKIPS] = {};
 int numSkips;
-int remap[2][MAX_REMAP];
+struct remap {
+    int in;
+    int out;
+    char* cmd;
+} remap[MAX_REMAP];
 int numRemap;
 
 struct pollfd devices[MAX_DEVICES];
@@ -34,11 +39,11 @@ unsigned long eventsToSupport = 1UL<<EV_KEY;
 unsigned char keysToSupport[(KEY_CNT+7)/8] = { 0 };
 int numDevices;
 
-int getRemap(int in) {
+struct remap* getRemap(int in) {
     for (int i=0; i<numRemap; i++)
-        if (remap[i][0] == in)
-            return remap[i][1];
-    return NOT_FOUND;
+        if (remap[i].in == in)
+            return &remap[i];
+    return NULL;
 }
 
 int main(int argc, char** argv) {
@@ -81,23 +86,37 @@ int main(int argc, char** argv) {
     numRemap = 0;
     
     while (arg + 1 < argc) {
-        remap[numRemap][0] = atoi(argv[arg]);
-        remap[numRemap][1] = atoi(argv[arg+1]);
-        arg += 2;
+        remap[numRemap].in = atoi(argv[arg]);
+        if (!strcmp(argv[arg+1],"su")) {
+            remap[numRemap].out = -1;
+            if (arg + 2 >= argc) {
+                fprintf(stderr, "No command given for %d\n", remap[numRemap].in);
+                exit(12);
+            }
+            remap[numRemap].cmd = argv[arg+2];
+            arg += 3;
+        }
+        else {
+            remap[numRemap].out = atoi(argv[arg+1]);
+            remap[numRemap].cmd = NULL;
+            arg += 2;
+        }
         numRemap++;
     }
     
     if (numRemap == 0) {
-        remap[0][0] = KEY_VOLUMEDOWN;
-        remap[0][1] = KEY_PAGEDOWN;
-        remap[1][0] = KEY_VOLUMEUP;
-        remap[1][1] = KEY_PAGEUP;
+        remap[0].in = KEY_VOLUMEDOWN;
+        remap[0].out = KEY_PAGEDOWN;
+        remap[0].cmd = NULL;
+        remap[1].in = KEY_VOLUMEUP;
+        remap[1].out = KEY_PAGEUP;
+        remap[1].cmd = NULL;
         numRemap = 2;
     }
     
     if (verbose) {
         for (int i=0; i<numRemap; i++) 
-            printf("Configured remap: %d -> %d\n", remap[i][0], remap[i][1]);
+            printf("Configured remap: %d -> %d %s\n", remap[i].in, remap[i].out, remap[i].cmd != NULL ? remap[i].cmd : "(no command)");
     }
 
     FILE* f = fopen("/proc/bus/input/devices", "r");
@@ -165,14 +184,14 @@ int main(int argc, char** argv) {
                 ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(k)), &k);
                 int need = 0;
                 for (int i=0; i<numRemap; i++)
-                    if (GET_BIT(k, remap[i][0])) {
+                    if (GET_BIT(k, remap[i].in)) {
                         need = 1;
                         break;
                     }
                     
                 if (!need) {
                     close(fd);
-                    printf(" No needed keys\n");
+                    if (verbose) printf(" No needed keys\n");
                     continue;
                 }
 
@@ -225,11 +244,11 @@ int main(int argc, char** argv) {
     }
 
     for (int i=0;i<numRemap && i<=KEY_MAX; i++)
-        CLR_BIT(keysToSupport, remap[i][0]);
+        CLR_BIT(keysToSupport, remap[i].in);
 
     for (int i=0;i<numRemap && i<=KEY_MAX; i++)
-        if (0 <= remap[i][1])
-            SET_BIT(keysToSupport, remap[i][1]);
+        if (0 <= remap[i].out)
+            SET_BIT(keysToSupport, remap[i].out);
     
     for (int i=0; i<=KEY_MAX; i++)
         if (GET_BIT(keysToSupport, i))
@@ -248,15 +267,28 @@ int main(int argc, char** argv) {
                     struct input_event event;
                     
                     if (sizeof(event) == read(devices[i].fd, &event, sizeof(event))) {
-                        int outCode = getRemap(event.code);
-                        if (outCode >= 0) {
+                        struct remap* rp = getRemap(event.code);
+                        if (rp != NULL && rp->out >= 0) {
                             if (verbose) {
-                                printf("%d -> %d\n", event.code, outCode);
+                                printf("%d -> %d\n", event.code, rp->out);
                             }
-                            event.code = outCode;
+                            event.code = rp->out;
                         }
-                        if (outCode >= 0 || outCode == NOT_FOUND) {
+                        if (rp == NULL || rp->out >= 0) {
                             write(fakeKeyboardHandle, &event, sizeof(event));
+                        }
+                        if (event.value == 1 && rp != NULL && rp->cmd != NULL) {
+                            if (verbose) 
+                                system(rp->cmd);
+                            else {
+                                char* buf = malloc(strlen(rp->cmd)+sizeof(CMD_PREFIX)+1);
+                                if (buf != NULL) {
+                                    strcpy(buf, CMD_PREFIX);
+                                    strcat(buf, rp->cmd);
+                                    system(buf);
+                                    free(buf);
+                                }
+                            }
                         }
                     }
                 }
