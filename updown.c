@@ -1,6 +1,7 @@
 // PUBLIC DOMAIN CODE
 // Remap volume up/down keys on OnePlus 9 as page-up/down
 
+#include <dirent.h> 
 #include <stdio.h>
 #include <malloc.h>
 #include <string.h>
@@ -25,8 +26,16 @@
 
 const char CMD_PREFIX[] = ">/dev/null 2>/dev/null ";
 
-char* skip[MAX_SKIPS] = {};
-int numSkips;
+enum skipTypes {
+    LOCATION = 0
+};
+int numSkip = 0;
+
+struct skip {
+    enum skipTypes type;
+    char* data;
+} skip[MAX_SKIPS];
+
 struct remap {
     int in;
     int out;
@@ -51,20 +60,28 @@ int main(int argc, char** argv) {
     int arg = 1;
     int verbose = 0;
     int skipOptions = 0;
-    int numSkips = 0;
     
     while (arg < argc && argv[arg][0] == '-') {
+        if (argv[arg][1] == 'h') {
+            printf("updown [--skip-location location] [--no-skip] [-v] REMAP LIST...\n"
+                   " where REMAP LIST... is a list of entries of the form:\n"
+                   "  x y                : remap key code x (decimal) to y; if y is -1, disable x\n"
+                   "  x cmd SHELLCOMMAND : run SHELLCOMMAND when key code x is pressed\n");
+            exit(0);
+        }
         if (argv[arg][1] == 'v')
             verbose = 1;
-        if (!strcmp(argv[arg]+1,"-skip")) {
+        if (!strcmp(argv[arg]+1,"-skip-location")) {
             if (arg+1 >= argc) {
-                fprintf(stderr, "--skip needs an argument\n");
+                fprintf(stderr, "--skip-location needs an argument\n");
                 exit(8);
             }
             skipOptions = 1;
-            if (numSkips < MAX_SKIPS) {
-                skip[numSkips] = argv[arg+1];
-                numSkips++;
+
+            if (numSkip < MAX_SKIPS) {
+                skip[numSkip].data = argv[arg+1];
+                skip[numSkip].type = LOCATION;
+                numSkip++;
             }
             else {
                 fprintf(stderr, "Too many skips\n");
@@ -73,21 +90,22 @@ int main(int argc, char** argv) {
         }
         else if (!strcmp(argv[arg]+1,"-no-skip")) {
             skipOptions = 1;
-            numSkips=0;
+            numSkip=0;
         }
         arg++;
     }
     
     if (! skipOptions) {
-        skip[0] = "P: Phys=ALSA";
-        numSkips = 1;
+        skip[0].data = "ALSA";
+        skip[0].type = LOCATION;
+        numSkip = 1;
     }
     
     numRemap = 0;
     
     while (arg + 1 < argc) {
         remap[numRemap].in = atoi(argv[arg]);
-        if (!strcmp(argv[arg+1],"su")) {
+        if (!strcmp(argv[arg+1],"cmd")) {
             remap[numRemap].out = -1;
             if (arg + 2 >= argc) {
                 fprintf(stderr, "No command given for %d\n", remap[numRemap].in);
@@ -118,100 +136,92 @@ int main(int argc, char** argv) {
         for (int i=0; i<numRemap; i++) 
             printf("Configured remap: %d -> %d %s\n", remap[i].in, remap[i].out, remap[i].cmd != NULL ? remap[i].cmd : "(no command)");
     }
-
-    FILE* f = fopen("/proc/bus/input/devices", "r");
-    if (f == NULL) {
-        fprintf(stderr, "Cannot read list of devices\n");
-        exit(1);
-    }
         
-    char line[BUFSIZE+1];
-    
-    int skipCurrent = 0;
     numDevices = 0;
     
-    while (NULL != fgets(line,BUFSIZE,f)) {
-        if (numDevices >= MAX_DEVICES)
+    DIR *d;
+    struct dirent *dir;
+    d = opendir("/dev/input");
+
+    if (d==NULL) {
+        fprintf(stderr, "Cannot open /dev/input\n");
+        exit(1);
+    }
+
+    while (numDevices < MAX_DEVICES) {
+        dir = readdir(d);
+        
+        if (NULL == dir)
             break;
         
-        int i;
+        char filename[BUFSIZE];
         
-        line[BUFSIZE] = 0;
-        int l = strlen(line);
-        if (l == 0)
+        if (strlen(dir->d_name)+11 >= BUFSIZE)
             continue;
-        if (line[l-1] == '\n')
-            line[l-1] = 0;
         
-        if (!strncmp(line, "I: ", 3)) {
-            skipCurrent = 0;
+        sprintf(filename, "/dev/input/%s", dir->d_name);
+        
+        if (verbose)
+            printf("Trying %s\n", filename);
+        
+        int fd = open(filename, O_RDONLY|O_NONBLOCK);
+        if (fd < 0) 
+            continue;
+
+        int i;
+        for (i=0; i<numSkip; i++) {
+            if (skip[i].type == LOCATION) {
+                char location[BUFSIZE];
+                if (ioctl(fd, EVIOCGPHYS(sizeof(location) - 1), &location) < 1) {
+                    location[0] = 0;
+                }
+                if (!strcmp(skip[i].data, location))
+                    break;
+            }
+        }
+        
+        if (i<numSkip) {
+            close(fd);
             continue;
         }
         
-        if (skipCurrent)
+        unsigned long e = 0;
+        ioctl(fd, EVIOCGBIT(0, sizeof(e)), &e);
+        if (0 == (e & (1UL << EV_KEY))) {
+            close(fd);
+            if (verbose)
+                printf(" No keys\n");
             continue;
-        
-        for (i = 0 ; i < numSkips; i++)
-            if (!strcmp(line, skip[i])) {
-                skipCurrent = 1;
+        }
+        unsigned char k[(KEY_CNT+7)/8] = { 0 };
+        ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(k)), &k);
+        int need = 0;
+        for (i=0; i<numRemap; i++)
+            if (GET_BIT(k, remap[i].in)) {
+                need = 1;
                 break;
             }
-
-        if (skipCurrent)
+            
+        if (!need) {
+            close(fd);
+            if (verbose) printf(" No needed keys\n");
             continue;
-
-        if (!strncmp(line, "H: Handlers=", 57-45)) {
-            skipCurrent = 1;
-
-            char filename[BUFSIZE];
-            char* s = strstr(line, "event");
-            if (s != NULL) {
-                sprintf(filename, "/dev/input/event%d", atoi(s+5));
-            }
-            if (verbose)
-                printf("Trying %s\n", filename);
-            int fd = open(filename, O_RDONLY|O_NONBLOCK);
-            if (0 <= fd) {
-                unsigned long e = 0;
-                ioctl(fd, EVIOCGBIT(0, sizeof(e)), &e);
-                if (0 == (e & (1UL << EV_KEY))) {
-                    close(fd);
-                    if (verbose)
-                        printf(" No keys\n");
-                    continue;
-                }
-                unsigned char k[(KEY_CNT+7)/8] = { 0 };
-                ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(k)), &k);
-                int need = 0;
-                for (int i=0; i<numRemap; i++)
-                    if (GET_BIT(k, remap[i].in)) {
-                        need = 1;
-                        break;
-                    }
-                    
-                if (!need) {
-                    close(fd);
-                    if (verbose) printf(" No needed keys\n");
-                    continue;
-                }
-
-                eventsToSupport |= e;
-                for (int i=0; i<=KEY_CNT; i++) {
-                    if (GET_BIT(k, i))
-                        SET_BIT(keysToSupport, i);
-                }
-                
-                ioctl(fd, EVIOCGRAB, (void*)1);
-                devices[numDevices].fd = fd;
-                devices[numDevices].events = POLLIN;
-                if (verbose) {
-                    printf(" Including!\n");
-                }
-                numDevices++;
-            }
         }
+
+        eventsToSupport |= e;
+        for (i=0; i<=KEY_CNT; i++) {
+            if (GET_BIT(k, i))
+                SET_BIT(keysToSupport, i);
+        }
+        
+        ioctl(fd, EVIOCGRAB, (void*)1);
+        devices[numDevices].fd = fd;
+        devices[numDevices].events = POLLIN;
+        if (verbose) {
+            printf(" Including!\n");
+        }
+        numDevices++;
     }
-    fclose(f);
     
     if (numDevices==0) {
         fprintf(stderr, "No good input devices found\n");
