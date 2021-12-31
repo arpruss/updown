@@ -8,7 +8,7 @@ LD=$(target_host)-ld
 STRIP=$target_host-strip
 
 # Tell configure what flags Android requires.
-CFLAGS=-pie -fPIC
+CFLAGS=-pie -fPIC -O3
 LDFLAGS=-pie
 SOURCES=updown.c
 OBJECTS=$(SOURCES:.cpp=.o)
@@ -16,7 +16,7 @@ EXECUTABLE=updown
 
 all: $(SOURCES) $(EXECUTABLE)
 $(EXECUTABLE): $(OBJECTS) 
-	$(CC) $(LDFLAGS) $(OBJECTS) -o $@
+	$(CC) $(CFLAGS) $(LDFLAGS) $(OBJECTS) -o $@
 .c.o:
 	$(CXX) $(CFLAGS) $< -o $@
 .cpp.o:

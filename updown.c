@@ -13,6 +13,7 @@
 
 #define MAX_DEVICES 128
 #define MAX_REMAP 256
+#define MAX_SKIPS 256
 
 #define BUFSIZE 1024
 #define NUM_KEY_BITS
@@ -23,8 +24,9 @@
 #define SET_BIT(data,bit) data[(bit)/8] |= 1 << ((bit)%8)
 #define CLR_BIT(data,bit) data[(bit)/8] &= ~(1 << ((bit)%8))
 
-char* skip[] = {"P: Phys=ALSA"};
-int remap[MAX_REMAP][2];
+char* skip[MAX_SKIPS] = {};
+int numSkips;
+int remap[2][MAX_REMAP];
 int numRemap;
 
 struct pollfd devices[MAX_DEVICES];
@@ -43,11 +45,37 @@ int main(int argc, char** argv) {
     
     int arg = 1;
     int verbose = 0;
+    int skipOptions = 0;
+    int numSkips = 0;
     
     while (arg < argc && argv[arg][0] == '-') {
         if (argv[arg][1] == 'v')
             verbose = 1;
+        if (!strcmp(argv[arg]+1,"-skip")) {
+            if (arg+1 >= argc) {
+                fprintf(stderr, "--skip needs an argument\n");
+                exit(8);
+            }
+            skipOptions = 1;
+            if (numSkips < MAX_SKIPS) {
+                skip[numSkips] = argv[arg+1];
+                numSkips++;
+            }
+            else {
+                fprintf(stderr, "Too many skips\n");
+            }
+            arg++;
+        }
+        else if (!strcmp(argv[arg]+1,"-no-skip")) {
+            skipOptions = 1;
+            numSkips=0;
+        }
         arg++;
+    }
+    
+    if (! skipOptions) {
+        skip[0] = "P: Phys=ALSA";
+        numSkips = 1;
     }
     
     numRemap = 0;
@@ -74,11 +102,12 @@ int main(int argc, char** argv) {
 
     FILE* f = fopen("/proc/bus/input/devices", "r");
     if (f == NULL) {
-        fprintf(stderr, "Cannot scan devices\n");
+        fprintf(stderr, "Cannot read list of devices\n");
         exit(1);
     }
         
     char line[BUFSIZE+1];
+    
     int skipCurrent = 0;
     numDevices = 0;
     
@@ -103,7 +132,7 @@ int main(int argc, char** argv) {
         if (skipCurrent)
             continue;
         
-        for (i = 0 ; i < sizeof(skip)/sizeof(*skip); i++)
+        for (i = 0 ; i < numSkips; i++)
             if (!strcmp(line, skip[i])) {
                 skipCurrent = 1;
                 break;
@@ -120,12 +149,16 @@ int main(int argc, char** argv) {
             if (s != NULL) {
                 sprintf(filename, "/dev/input/event%d", atoi(s+5));
             }
+            if (verbose)
+                printf("Trying %s\n", filename);
             int fd = open(filename, O_RDONLY|O_NONBLOCK);
             if (0 <= fd) {
                 unsigned long e = 0;
                 ioctl(fd, EVIOCGBIT(0, sizeof(e)), &e);
                 if (0 == (e & (1UL << EV_KEY))) {
                     close(fd);
+                    if (verbose)
+                        printf(" No keys\n");
                     continue;
                 }
                 unsigned char k[(KEY_CNT+7)/8] = { 0 };
@@ -139,6 +172,7 @@ int main(int argc, char** argv) {
                     
                 if (!need) {
                     close(fd);
+                    printf(" No needed keys\n");
                     continue;
                 }
 
@@ -152,7 +186,7 @@ int main(int argc, char** argv) {
                 devices[numDevices].fd = fd;
                 devices[numDevices].events = POLLIN;
                 if (verbose) {
-                    printf("Including %s\n", filename);
+                    printf(" Including!\n");
                 }
                 numDevices++;
             }
@@ -222,7 +256,6 @@ int main(int argc, char** argv) {
                             event.code = outCode;
                         }
                         if (outCode >= 0 || outCode == NOT_FOUND) {
-                            printf("write\n");
                             write(fakeKeyboardHandle, &event, sizeof(event));
                         }
                     }
