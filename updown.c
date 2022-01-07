@@ -232,7 +232,7 @@ int main(int argc, char** argv) {
             printf("  Location: %s\n", location);
         
         char name[BUFSIZE];
-        if (ioctl(fd, EVIOCGNAME(sizeof(location) - 1), &name) < 1) {
+        if (ioctl(fd, EVIOCGNAME(sizeof(name) - 1), &name) < 1) {
             name[0] = 0;
         }
         

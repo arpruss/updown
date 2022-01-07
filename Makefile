@@ -1,5 +1,5 @@
 STANDALONE_TOOLCHAIN=~/ndk/bin/
-target_host=$(STANDALONE_TOOLCHAIN)aarch64-linux-android
+target_host=$(STANDALONE_TOOLCHAIN)armv7a-linux-androideabi16
 AR=$(target_host)-ar
 AS=$(target_host)-clang
 CC=$(target_host)-clang
@@ -23,6 +23,6 @@ $(EXECUTABLE): $(OBJECTS)
 	$(CXX) $(CFLAGS) $< -o $@
 
 clean: 
-	rm *.o updown;
+	rm *.o updown consume;
 
-all: updown
+all: updown consume
