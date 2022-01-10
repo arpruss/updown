@@ -163,7 +163,7 @@ int main(int argc, char** argv) {
     numRemap = 0;
     
     while (arg + 1 < argc) {
-        remap[numRemap].in = atoi(argv[arg]);
+        remap[numRemap].in = strtoul(argv[arg], NULL, 0);
         if (!strcmp(argv[arg+1],"cmd")) {
             remap[numRemap].out = -1;
             if (arg + 2 >= argc) {
@@ -174,7 +174,7 @@ int main(int argc, char** argv) {
             arg += 3;
         }
         else {
-            remap[numRemap].out = atoi(argv[arg+1]);
+            remap[numRemap].out = strtoul(argv[arg+1], NULL, 0);
             remap[numRemap].cmd = NULL;
             arg += 2;
         }
@@ -261,7 +261,7 @@ int main(int argc, char** argv) {
                 
                 switch(t) {
                     case BUS:
-                        matches = atoi(filters[i].data) == id.bustype;
+                        matches = strtoul(filters[i].data, NULL, 0) == id.bustype;
                         break;
                     case LOCATION:
                         matches = !strcmp(filters[i].data, location);
