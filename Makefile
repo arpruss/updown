@@ -23,6 +23,6 @@ $(EXECUTABLE): $(OBJECTS)
 	$(CXX) $(CFLAGS) $< -o $@
 
 clean: 
-	rm *.o updown consume eventgen;
+	rm *.o updown consume eventgen monitor;
 
-all: updown consume eventgen
+all: updown consume eventgen monitor
