@@ -16,8 +16,7 @@
 int sleepTime = 30;
 
 void goToSleep(void) {
-    if (0 == system("dumpsys power | grep mWakefulness=Awake > /dev/null"))
-        system("input keyevent 26");
+    system("(dumpsys power | grep mWakefulness=Awake > /dev/null) && input keyevent 26");
 }
 
 int main(int argc, char** argv) {
